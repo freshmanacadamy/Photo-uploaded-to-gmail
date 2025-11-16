@@ -1,30 +1,41 @@
 const TelegramBot = require('node-telegram-bot-api');
 const nodemailer = require('nodemailer');
 
+// Environment variables
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GMAIL_USER = process.env.GMAIL_USER;
 const GMAIL_PASS = process.env.GMAIL_PASS;
 
+if (!BOT_TOKEN) {
+  console.error('❌ BOT_TOKEN is required');
+  process.exit(1);
+}
+
 const bot = new TelegramBot(BOT_TOKEN);
 const userPhotos = new Map();
 
-// Gmail setup
-const transporter = nodemailer.createTransporter({
-  service: 'gmail',
-  auth: {
-    user: GMAIL_USER,
-    pass: GMAIL_PASS
-  }
-});
+// Gmail transporter
+let transporter;
+if (GMAIL_USER && GMAIL_PASS) {
+  transporter = nodemailer.createTransporter({
+    service: 'gmail',
+    auth: {
+      user: GMAIL_USER,
+      pass: GMAIL_PASS
+    }
+  });
+} else {
+  console.log('⚠️ Gmail credentials not set - Gmail upload disabled');
+}
 
 // Handle start command
 const handleStart = async (msg) => {
   const chatId = msg.chat.id;
   
   await bot.sendMessage(chatId,
-    `📸 *Simple Photo Bot*\n\n` +
-    `Just send me a photo and I'll give you the file link!\n` +
-    `📧 I can also upload it to Gmail if you want!`,
+    `📸 *Photo Upload Bot*\n\n` +
+    `Send me a photo and I'll give you the file link!` +
+    (transporter ? `\n📧 I can also upload it to Gmail!` : ''),
     { parse_mode: 'Markdown' }
   );
 };
@@ -50,20 +61,31 @@ const handlePhoto = async (msg) => {
       time: new Date()
     });
     
-    // Send file URL to user with Gmail option
+    // Create keyboard
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: []
+      }
+    };
+    
+    if (transporter) {
+      keyboard.reply_markup.inline_keyboard.push([
+        { text: '📧 Upload to Gmail', callback_data: `gmail_${file.file_id}` }
+      ]);
+    }
+    
+    keyboard.reply_markup.inline_keyboard.push([
+      { text: '❌ Close', callback_data: 'cancel' }
+    ]);
+    
+    // Send file URL to user
     await bot.sendMessage(chatId,
       `✅ *Photo Received!*\n\n` +
       `🔗 *File URL:*\n${fileUrl}\n\n` +
-      `📊 *Size:* ${(file.file_size / 1024).toFixed(1)} KB\n\n` +
-      `Want to upload this to Gmail?`,
+      `📊 *Size:* ${(file.file_size / 1024).toFixed(1)} KB`,
       { 
         parse_mode: 'Markdown',
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '📧 Upload to Gmail', callback_data: `gmail_${file.file_id}` }],
-            [{ text: '❌ No thanks', callback_data: 'cancel' }]
-          ]
-        }
+        reply_markup: keyboard.reply_markup
       }
     );
     
@@ -72,18 +94,18 @@ const handlePhoto = async (msg) => {
   }
 };
 
-// Upload to Gmail function
+// Upload to Gmail
 const uploadToGmail = async (fileUrl, fileName, chatId) => {
   try {
-    // Download the image
+    // Download image
     const response = await fetch(fileUrl);
-    const buffer = await response.buffer();
+    const buffer = Buffer.from(await response.arrayBuffer());
     
     const mailOptions = {
       from: GMAIL_USER,
-      to: GMAIL_USER, // Send to yourself, or you can make it configurable
-      subject: `📸 Photo from Telegram Bot - ${fileName}`,
-      text: `Photo uploaded from Telegram Bot\n\nFile: ${fileName}\nTime: ${new Date().toLocaleString()}`,
+      to: GMAIL_USER,
+      subject: `📸 Telegram Photo - ${fileName}`,
+      text: `Photo uploaded from Telegram Bot\nFile: ${fileName}\nTime: ${new Date().toLocaleString()}`,
       attachments: [
         {
           filename: fileName,
@@ -95,12 +117,12 @@ const uploadToGmail = async (fileUrl, fileName, chatId) => {
     await transporter.sendMail(mailOptions);
     return true;
   } catch (error) {
-    console.error('Gmail upload error:', error);
+    console.error('Gmail error:', error);
     return false;
   }
 };
 
-// Handle callback queries (Gmail upload)
+// Handle callback queries
 const handleCallbackQuery = async (callbackQuery) => {
   const chatId = callbackQuery.message.chat.id;
   const data = callbackQuery.data;
@@ -109,36 +131,30 @@ const handleCallbackQuery = async (callbackQuery) => {
     if (data.startsWith('gmail_')) {
       const fileId = data.replace('gmail_', '');
       
-      // Show uploading message
       await bot.answerCallbackQuery(callbackQuery.id, { text: '📧 Uploading to Gmail...' });
       
-      // Get the file
       const file = await bot.getFile(fileId);
       const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
-      const fileName = `telegram_photo_${Date.now()}.jpg`;
+      const fileName = `photo_${Date.now()}.jpg`;
       
-      // Upload to Gmail
       const success = await uploadToGmail(fileUrl, fileName, chatId);
       
       if (success) {
         await bot.sendMessage(chatId,
-          `✅ *Photo uploaded to Gmail!*\n\n` +
+          `✅ *Uploaded to Gmail!*\n\n` +
           `📧 Sent to: ${GMAIL_USER}\n` +
-          `📎 File: ${fileName}\n` +
-          `⏰ Time: ${new Date().toLocaleTimeString()}`,
+          `📎 File: ${fileName}`,
           { parse_mode: 'Markdown' }
         );
       } else {
-        await bot.sendMessage(chatId, '❌ Failed to upload to Gmail. Please try again.');
+        await bot.sendMessage(chatId, '❌ Failed to upload to Gmail');
       }
     } else if (data === 'cancel') {
-      await bot.answerCallbackQuery(callbackQuery.id, { text: 'Okay!' });
+      await bot.answerCallbackQuery(callbackQuery.id, { text: 'Closed' });
       await bot.deleteMessage(chatId, callbackQuery.message.message_id);
     }
-    
   } catch (error) {
-    await bot.answerCallbackQuery(callbackQuery.id, { text: '❌ Upload failed' });
-    await bot.sendMessage(chatId, `Error: ${error.message}`);
+    await bot.answerCallbackQuery(callbackQuery.id, { text: '❌ Error' });
   }
 };
 
@@ -153,8 +169,22 @@ const handleMessage = async (msg) => {
 
 // Vercel handler
 module.exports = async (req, res) => {
+  // CORS headers
+  res.setHeader('Access-Control-Allow-Credentials', true);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
+  
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  
   if (req.method === 'GET') {
-    return res.json({ status: 'Bot is running!' });
+    return res.json({ 
+      status: 'Bot is running!',
+      users: userPhotos.size,
+      gmail: !!transporter
+    });
   }
   
   if (req.method === 'POST') {
@@ -173,6 +203,7 @@ module.exports = async (req, res) => {
       
       return res.json({ ok: true });
     } catch (error) {
+      console.error('Error:', error);
       return res.status(500).json({ error: error.message });
     }
   }
